@@ -46,10 +46,11 @@ def _ip_is_public(ip: ipaddress._BaseAddress) -> bool:
     return ip.is_global and not ip.is_reserved
 
 
-def _resolve_pinned_ip(host: str) -> str:
+def _resolve_pinned_ips(host: str) -> list[str]:
     """
-    פותר את המארח, מוודא שכל כתובות ה-IP ציבוריות, ומחזיר כתובת אחת להצמדה.
+    פותר את המארח, מוודא שכל כתובות ה-IP ציבוריות, ומחזיר את כולן להצמדה.
     זורק ValueError אם אחת הכתובות פרטית/שמורה — מונע SSRF (כולל metadata).
+    מחזיר את כל הכתובות (IPv4/IPv6) כדי לאפשר fallback בין כתובות תקינות.
     """
     try:
         infos = socket.getaddrinfo(host, None)
@@ -57,7 +58,7 @@ def _resolve_pinned_ip(host: str) -> str:
         raise ValueError(f"שגיאת DNS: {host}") from e
     if not infos:
         raise ValueError(f"אין כתובת ל-{host}")
-    pinned = None
+    pinned: list[str] = []
     for info in infos:
         addr = info[4][0]
         try:
@@ -66,8 +67,8 @@ def _resolve_pinned_ip(host: str) -> str:
             raise ValueError(f"כתובת לא תקינה: {addr}") from e
         if not _ip_is_public(ip):
             raise ValueError("יעד לא מורשה (כתובת פרטית/שמורה)")
-        if pinned is None:
-            pinned = addr
+        if addr not in pinned:
+            pinned.append(addr)
     return pinned
 
 
@@ -94,6 +95,30 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
         self.sock = socket.create_connection((self._ip, self.port), self.timeout)
 
 
+def _open_pinned(host: str, ips: list[str], port: int, is_https: bool,
+                 path: str, context: ssl.SSLContext):
+    """
+    מנסה להתחבר לכל אחת מכתובות ה-IP שאומתו עד להצלחה (fallback IPv4/IPv6),
+    כל חיבור מוצמד לכתובת ליטרלית כדי לשמר את הגנת ה-SSRF.
+    מחזיר (conn, resp) של החיבור המוצלח, או זורק על כשל בכל הכתובות.
+    """
+    last_err: Exception | None = None
+    for ip in ips:
+        if is_https:
+            conn = _PinnedHTTPSConnection(host, ip, port=port,
+                                          timeout=FETCH_TIMEOUT, context=context)
+        else:
+            conn = _PinnedHTTPConnection(host, ip, port=port, timeout=FETCH_TIMEOUT)
+        try:
+            conn.request("GET", path,
+                         headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"})
+            return conn, conn.getresponse()
+        except OSError as e:  # כתובת לא נגישה — ננסה את הבאה
+            conn.close()
+            last_err = e
+    raise ValueError(f"החיבור נכשל בכל הכתובות של {host}") from last_err
+
+
 def _fetch_bytes(url: str) -> bytes:
     """
     מוריד את גוף הפיד עם timeout, UA דמוי-דפדפן והצמדת-IP נגד SSRF.
@@ -107,22 +132,18 @@ def _fetch_bytes(url: str) -> bytes:
         host = parsed.hostname
         if not host:
             raise ValueError("כתובת ללא מארח")
-        ip = _resolve_pinned_ip(host)  # אימות + הצמדה בו-זמנית
+        ips = _resolve_pinned_ips(host)  # אימות + הצמדה בו-זמנית (כל הכתובות)
         is_https = parsed.scheme == "https"
-        port = parsed.port or (443 if is_https else 80)
+        # parsed.port is None ⟵ ברירת מחדל; port 0 מפורש נפסל (0 נחשב falsy).
+        if parsed.port == 0:
+            raise ValueError("פורט לא תקין: 0")
+        port = parsed.port if parsed.port is not None else (443 if is_https else 80)
         path = parsed.path or "/"
         if parsed.query:
             path += "?" + parsed.query
 
-        if is_https:
-            conn = _PinnedHTTPSConnection(host, ip, port=port,
-                                          timeout=FETCH_TIMEOUT, context=context)
-        else:
-            conn = _PinnedHTTPConnection(host, ip, port=port, timeout=FETCH_TIMEOUT)
+        conn, resp = _open_pinned(host, ips, port, is_https, path, context)
         try:
-            conn.request("GET", path,
-                         headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"})
-            resp = conn.getresponse()
             if resp.status in (301, 302, 303, 307, 308):
                 location = resp.headers.get("Location")
                 resp.close()  # גוף ההפניה מיותר — סוגרים בלי לקרוא כדי לשמור על MAX_BYTES
