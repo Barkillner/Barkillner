@@ -214,7 +214,8 @@ def generate_weekly_plan(client, directions: str, model: str = DEFAULT_MODEL) ->
   "pillar": "שם הפילר (1-4)",
   "format": "סטורי/פוסט/קרוסלה/ריל/טיקטוק",
   "type": "יוזם או תגובתי",
-  "draft": "טיוטת המלל המוכן לפריט"
+  "draft": "טיוטת המלל המוכן לפריט",
+  "political_ask": true אם הטיוטה כוללת קריאה מפורשת להצביע למועמד/מפלגה או בקשת תרומה; אחרת false. תוכן ביקורתי/ערכי על דמוקרטיה שאינו קריאה ישירה — false
 }}
 ודא כיסוי מאוזן של הפילרים לאורך השבוע."""
     text = _message(client, model, prompt, max_tokens=6144, system=SYSTEM_ANALYST)
@@ -225,4 +226,14 @@ def generate_weekly_plan(client, directions: str, model: str = DEFAULT_MODEL) ->
         for item in data
     ):
         raise ValueError("תשובת התוכנית אינה במבנה הצפוי")
+    # דגל אישור מובנה מהמתכנן — מהימן יותר מזיהוי מילולי. ברירת מחדל בטוחה: כשהערך
+    # חסר או לא-חד-משמעי מסמנים True (דורש אישור), כדי שתוכן פוליטי לא יחליק ללא סימון.
+    for item in data:
+        raw = item.get("political_ask", None)
+        if isinstance(raw, bool):
+            item["political_ask"] = raw
+        elif raw is None:                       # דגל חסר ⟵ ברירת מחדל בטוחה: דורש אישור
+            item["political_ask"] = True
+        else:                                   # מחרוזת/אחר ⟵ True אלא אם שלילי מפורש
+            item["political_ask"] = str(raw).strip().lower() not in ("false", "0", "no")
     return data
