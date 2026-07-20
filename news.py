@@ -41,8 +41,9 @@ class Headline:
 # אליה בפועל, וכל יעד הפניה נבדק מחדש.
 # ---------------------------------------------------------------------------
 def _ip_is_public(ip: ipaddress._BaseAddress) -> bool:
-    return not (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+    # is_global פוסל גם טווחי shared address space (RFC 6598, למשל 100.64.0.0/10)
+    # שאינם ניתובים גלובלית; is_reserved נשמר כחגורת-ביטחון לכתובות מיוחדות/ממופות.
+    return ip.is_global and not ip.is_reserved
 
 
 def _resolve_pinned_ip(host: str) -> str:
@@ -124,7 +125,7 @@ def _fetch_bytes(url: str) -> bytes:
             resp = conn.getresponse()
             if resp.status in (301, 302, 303, 307, 308):
                 location = resp.headers.get("Location")
-                resp.read()
+                resp.close()  # גוף ההפניה מיותר — סוגרים בלי לקרוא כדי לשמור על MAX_BYTES
                 if not location:
                     raise ValueError("הפניה ללא כתובת יעד")
                 url = urljoin(url, location)  # ⟵ נבדק בסבב הבא
