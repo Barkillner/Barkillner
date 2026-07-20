@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import socket
-import urllib.error
-import urllib.request
+import ssl
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import feedparser
 
@@ -17,6 +17,7 @@ USER_AGENT = "Mozilla/5.0 (compatible; StrategicContentDashboard/1.0)"
 FETCH_TIMEOUT = 12          # שניות לכל פיד — מונע תקיעה על פיד לא מגיב
 MAX_BYTES = 4_000_000       # תקרת הורדה לפיד
 MAX_SUMMARY = 600           # תקרת אורך לתקציר שנשלח ל-Claude
+MAX_REDIRECTS = 5           # תקרת הפניות
 
 
 @dataclass
@@ -35,50 +36,105 @@ class Headline:
 
 
 # ---------------------------------------------------------------------------
-# הקשחת SSRF — חוסמים יעדים פרטיים/שמורים גם בהפניות (redirects)
+# הקשחת SSRF — פותרים כתובת פעם אחת, מוודאים שהיא ציבורית ומצמידים את החיבור
+# אליה (pinning). כך אין TOCTOU/DNS-rebinding: אותה כתובת שנבדקה היא זו שמתחברים
+# אליה בפועל, וכל יעד הפניה נבדק מחדש.
 # ---------------------------------------------------------------------------
-def _host_is_public(host: str) -> bool:
-    """True רק אם כל כתובות ה-IP של המארח ציבוריות (מונע SSRF פנימי/metadata)."""
+def _ip_is_public(ip: ipaddress._BaseAddress) -> bool:
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified)
+
+
+def _resolve_pinned_ip(host: str) -> str:
+    """
+    פותר את המארח, מוודא שכל כתובות ה-IP ציבוריות, ומחזיר כתובת אחת להצמדה.
+    זורק ValueError אם אחת הכתובות פרטית/שמורה — מונע SSRF (כולל metadata).
+    """
     try:
         infos = socket.getaddrinfo(host, None)
-    except socket.gaierror:
-        return False
+    except socket.gaierror as e:
+        raise ValueError(f"שגיאת DNS: {host}") from e
+    if not infos:
+        raise ValueError(f"אין כתובת ל-{host}")
+    pinned = None
     for info in infos:
+        addr = info[4][0]
         try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return False
-        if (ip.is_private or ip.is_loopback or ip.is_link_local
-                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-            return False
-    return True
+            ip = ipaddress.ip_address(addr)
+        except ValueError as e:
+            raise ValueError(f"כתובת לא תקינה: {addr}") from e
+        if not _ip_is_public(ip):
+            raise ValueError("יעד לא מורשה (כתובת פרטית/שמורה)")
+        if pinned is None:
+            pinned = addr
+    return pinned
 
 
-def _validate_url(url: str) -> None:
-    """מוודא סכימת http(s) ומארח ציבורי. זורק ValueError אחרת."""
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        raise ValueError(f"סכימה לא נתמכת: {parsed.scheme or 'ריק'}")
-    if not parsed.hostname or not _host_is_public(parsed.hostname):
-        raise ValueError("יעד לא מורשה (כתובת פרטית/שמורה)")
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """מתחבר לכתובת ה-IP שאומתה, אך שומר את שם המארח ל-SNI ולאימות התעודה."""
+    def __init__(self, host: str, ip: str, **kw):
+        super().__init__(host, **kw)
+        self._ip = ip
+
+    def connect(self):
+        self.sock = socket.create_connection((self._ip, self.port), self.timeout)
+        if self._tunnel_host:
+            self._tunnel()
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
 
 
-class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """מוודא כל יעד הפניה מול אותם כללי SSRF."""
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        _validate_url(newurl)  # זורק ⟵ עוצר את ההפניה
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """מתחבר לכתובת ה-IP שאומתה, שומר את שם המארח ל-Host header."""
+    def __init__(self, host: str, ip: str, **kw):
+        super().__init__(host, **kw)
+        self._ip = ip
 
-
-_opener = urllib.request.build_opener(_SafeRedirectHandler())
+    def connect(self):
+        self.sock = socket.create_connection((self._ip, self.port), self.timeout)
 
 
 def _fetch_bytes(url: str) -> bytes:
-    """מוריד את גוף הפיד עם timeout, UA דמוי-דפדפן ובדיקת SSRF (כולל הפניות)."""
-    _validate_url(url)
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with _opener.open(req, timeout=FETCH_TIMEOUT) as resp:
-        return resp.read(MAX_BYTES)
+    """
+    מוריד את גוף הפיד עם timeout, UA דמוי-דפדפן והצמדת-IP נגד SSRF.
+    עוקב אחרי הפניות ידנית ובודק כל יעד מחדש.
+    """
+    context = ssl.create_default_context()
+    for _ in range(MAX_REDIRECTS + 1):
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(f"סכימה לא נתמכת: {parsed.scheme or 'ריק'}")
+        host = parsed.hostname
+        if not host:
+            raise ValueError("כתובת ללא מארח")
+        ip = _resolve_pinned_ip(host)  # אימות + הצמדה בו-זמנית
+        is_https = parsed.scheme == "https"
+        port = parsed.port or (443 if is_https else 80)
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+
+        if is_https:
+            conn = _PinnedHTTPSConnection(host, ip, port=port,
+                                          timeout=FETCH_TIMEOUT, context=context)
+        else:
+            conn = _PinnedHTTPConnection(host, ip, port=port, timeout=FETCH_TIMEOUT)
+        try:
+            conn.request("GET", path,
+                         headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"})
+            resp = conn.getresponse()
+            if resp.status in (301, 302, 303, 307, 308):
+                location = resp.headers.get("Location")
+                resp.read()
+                if not location:
+                    raise ValueError("הפניה ללא כתובת יעד")
+                url = urljoin(url, location)  # ⟵ נבדק בסבב הבא
+                continue
+            if resp.status != 200:
+                raise ValueError(f"HTTP {resp.status}")
+            return resp.read(MAX_BYTES)
+        finally:
+            conn.close()
+    raise ValueError("יותר מדי הפניות")
 
 
 def _source_name(feed: feedparser.FeedParserDict, url: str) -> str:
