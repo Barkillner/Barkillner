@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import html
+
 import pandas as pd
 import streamlit as st
 
@@ -131,6 +133,10 @@ def view_dashboard():
             if not urls:
                 st.error("לא הוגדרו פידי RSS. הוסף כתובות בסרגל הצד.")
             else:
+                # איפוס מיידי — לא משאירים סריקה ישנה שנראית עדכנית אם החדשה נכשלת
+                st.session_state.headlines = []
+                st.session_state.analysis = {}
+                st.session_state.scan_errors = []
                 with st.spinner("שלב 1/2 — גירוד כותרות מהפידים..."):
                     raw, errors = news.fetch_all(urls)
                 st.session_state.scan_errors = errors
@@ -141,7 +147,6 @@ def view_dashboard():
                         try:
                             idxs = ai.filter_relevant(client, raw, st.session_state.model)
                             st.session_state.headlines = [raw[i] for i in idxs]
-                            st.session_state.analysis = {}  # איפוס ניתוחים ישנים
                         except Exception as e:
                             st.error(f"שגיאה בסינון: {e}")
 
@@ -156,18 +161,19 @@ def view_dashboard():
     st.success(f"נמצאו {len(headlines)} כותרות רלוונטיות אסטרטגית.")
     st.divider()
 
-    for h in headlines:
+    for idx, h in enumerate(headlines):
         with st.container():
+            # escaping — source/title מגיעים מהפיד (מקור לא מהימן), למנוע הזרקת HTML
             st.markdown(
                 f"<div class='strategic-card'>"
-                f"<div class='card-source'>{h.source}</div>"
-                f"<h4>{h.title}</h4>"
+                f"<div class='card-source'>{html.escape(h.source)}</div>"
+                f"<h4>{html.escape(h.title)}</h4>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
             cols = st.columns([1, 1, 3])
             with cols[0]:
-                analyze = st.button("🧠 נתח אסטרטגית", key=f"btn_{h.key}")
+                analyze = st.button("🧠 נתח אסטרטגית", key=f"btn_{idx}")
             with cols[1]:
                 if h.link:
                     st.link_button("🔗 לכתבה", h.link)
@@ -177,17 +183,17 @@ def view_dashboard():
                 if client:
                     with st.spinner("מנתח ומפיק חבילת תוכן..."):
                         try:
-                            st.session_state.analysis[h.key] = ai.analyze_headline(
+                            st.session_state.analysis[idx] = ai.analyze_headline(
                                 client, h, st.session_state.model
                             )
                         except Exception as e:
                             st.error(f"שגיאה בניתוח: {e}")
 
-            if h.key in st.session_state.analysis:
-                _render_analysis(st.session_state.analysis[h.key])
+            if idx in st.session_state.analysis:
+                _render_analysis(st.session_state.analysis[idx], idx)
 
 
-def _render_analysis(a: dict):
+def _render_analysis(a: dict, idx: int):
     """מציג ניתוח מלא + חבילת תוכן + הוראות הפקה בתוך אקספנדר פתוח."""
     with st.expander("📋 ניתוח וחבילת תוכן", expanded=True):
         st.markdown(f"**ניתוח הידיעה:** {a.get('analysis', '')}")
@@ -203,18 +209,18 @@ def _render_analysis(a: dict):
         tabs = st.tabs(["פייסבוק", "אינסטגרם", "סטורי", "טיקטוק / ריל"])
         with tabs[0]:
             st.text_area("פוסט פייסבוק", cp.get("facebook", ""), height=180,
-                         key=f"fb_{id(a)}")
+                         key=f"fb_{idx}")
         with tabs[1]:
             st.text_area("כיתוב אינסטגרם", cp.get("instagram_caption", ""), height=120,
-                         key=f"ig_{id(a)}")
+                         key=f"ig_{idx}")
             st.markdown(f"**רעיון ויזואלי:** {cp.get('instagram_visual', '')}")
         with tabs[2]:
             st.text_area("רצף סטורי", cp.get("story_sequence", ""), height=140,
-                         key=f"st_{id(a)}")
+                         key=f"st_{idx}")
         with tabs[3]:
             st.markdown(f"**הוק:** {cp.get('reel_hook', '')}")
             st.text_area("תסריט ריל / טיקטוק", cp.get("reel_script", ""), height=160,
-                         key=f"rl_{id(a)}")
+                         key=f"rl_{idx}")
 
         st.markdown("### 🎬 הוראות הפקה")
         eg = a.get("execution_guide", {})
