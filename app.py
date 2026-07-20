@@ -115,6 +115,21 @@ def _feed_urls() -> list[str]:
     return [u.strip() for u in st.session_state.feeds.splitlines() if u.strip()]
 
 
+# ביטויים שמסמנים קריאה אלקטורלית/גיוס — מפעילים שער אישור פוליטי בתוכנית ובייצוא
+_POLITICAL_TERMS = (
+    "להצביע", "הצביע", "תצביע", "מצביע", "קלפי", "מנדט", "רשימה", "מפלגה",
+    "קמפיין", "בחירות", 'ח"כ', "לתרום", "תרמו", "תרומה", "תתרמו",
+)
+
+
+def _approval_marker(row: dict) -> str:
+    """מחזיר סימון אישור לשורת תוכנית: פוליטי/גיוס אם יש קריאה אלקטורלית/תרומה."""
+    text = " ".join(str(row.get(k, "")) for k in ("draft", "type", "format"))
+    if any(term in text for term in _POLITICAL_TERMS):
+        return "⚠️ אישור אייל (פוליטי/גיוס)"
+    return "טיוטה — לאישור אייל"
+
+
 # ---------------------------------------------------------------------------
 # תצוגה 1 — דשבורד חי (מרכז בקרה)
 # ---------------------------------------------------------------------------
@@ -265,10 +280,18 @@ def view_weekly():
         st.divider()
         st.subheader("התוכנית השבועית")
         df = pd.DataFrame(plan)
+        # שער אישור — כל שורה טיוטה לאישור אייל; שורה עם קריאה אלקטורלית/גיוס
+        # מסומנת מפורשות כדורשת אישור פוליטי לפני שהיא עוזבת את הדשבורד (כולל בייצוא).
+        df["approval"] = [_approval_marker(r) for r in plan]
+        political = df["approval"].str.contains("פוליטי").any()
+        if political:
+            st.warning("⚠️ חלק מהשורות כוללות קריאה אלקטורלית/גיוס — דורשות **אישור אייל (פוליטי)** לפני פרסום. הסימון נשמר גם בקובץ המיוצא.")
+        else:
+            st.caption("כל שורה היא טיוטה לאישור אייל.")
         rename = {"day": "יום", "pillar": "פילר", "format": "פורמט",
-                  "type": "אופי", "draft": "טיוטה"}
+                  "type": "אופי", "draft": "טיוטה", "approval": "אישור"}
         df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
-        order = [c for c in ["יום", "פילר", "פורמט", "אופי", "טיוטה"] if c in df.columns]
+        order = [c for c in ["יום", "פילר", "פורמט", "אופי", "טיוטה", "אישור"] if c in df.columns]
         st.dataframe(df[order] if order else df, use_container_width=True, hide_index=True)
 
         csv = df.to_csv(index=False).encode("utf-8-sig")
