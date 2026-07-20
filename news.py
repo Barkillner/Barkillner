@@ -110,8 +110,11 @@ def _open_pinned(host: str, ips: list[str], port: int, is_https: bool,
         else:
             conn = _PinnedHTTPConnection(host, ip, port=port, timeout=FETCH_TIMEOUT)
         try:
+            # Connection: close — בקשה חד-פעמית; מונע תקיעה עד תום ה-timeout על
+            # תשובות ללא Content-Length/chunked, ומאפשר סגירה מיד עם סיום הגוף.
             conn.request("GET", path,
-                         headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"})
+                         headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity",
+                                  "Connection": "close"})
             return conn, conn.getresponse()
         except OSError as e:  # כתובת לא נגישה — ננסה את הבאה
             conn.close()
@@ -139,6 +142,8 @@ def _fetch_bytes(url: str) -> bytes:
             raise ValueError("פורט לא תקין: 0")
         port = parsed.port if parsed.port is not None else (443 if is_https else 80)
         path = parsed.path or "/"
+        if parsed.params:                       # פרמטרי נתיב עם ; — לשמר את המשאב הנכון
+            path += ";" + parsed.params
         if parsed.query:
             path += "?" + parsed.query
 
