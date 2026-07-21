@@ -1,0 +1,11 @@
+# ערכת נושא כהה — ה-CSS של האפליקציה מתוכנן לרקע כהה (כרטיסים, צבעי טקסט מעומעמים).
+# כפיית base=dark מבטיחה שהאפליקציה תיראה נכון לכל צופה, גם ב-Streamlit Community Cloud.
+[theme]
+base = "dark"
+primaryColor = "#e8a13c"
+backgroundColor = "#0e1524"
+secondaryBackgroundColor = "#17213a"
+textColor = "#e8eefc"
+
+[server]
+headless = true
