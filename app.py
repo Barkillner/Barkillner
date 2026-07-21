@@ -44,8 +44,17 @@ st.markdown(
 # ---------------------------------------------------------------------------
 # מצב (session_state)
 # ---------------------------------------------------------------------------
+def _secret_api_key() -> str:
+    """מפתח Anthropic מסוד Streamlit אם הוגדר (למשל בפריסה), אחרת מחרוזת ריקה.
+    עטוף ב-try כי גישה ל-st.secrets ללא קובץ סודות עלולה לזרוק חריגה."""
+    try:
+        return str(st.secrets.get("ANTHROPIC_API_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
 _defaults = {
-    "api_key": "",
+    "api_key": _secret_api_key(),   # ברירת מחדל מסוד אם קיים; אחרת המשתמש מדביק ידנית
     "feeds": "\n".join(DEFAULT_FEEDS),
     "model": ai.DEFAULT_MODEL,
     "headlines": [],          # רשימת Headline מסוננות
