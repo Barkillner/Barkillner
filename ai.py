@@ -215,8 +215,11 @@ def generate_weekly_plan(client, directions: str, model: str = DEFAULT_MODEL) ->
   "format": "סטורי/פוסט/קרוסלה/ריל/טיקטוק",
   "type": "יוזם או תגובתי",
   "draft": "טיוטת המלל המוכן לפריט",
-  "political_ask": true אם הטיוטה כוללת קריאה מפורשת להצביע למועמד/מפלגה או בקשת תרומה; אחרת false. תוכן ביקורתי/ערכי על דמוקרטיה שאינו קריאה ישירה — false
+  "political_ask": true
 }}
+כלל ל-political_ask (ערך בוליאני, true או false): true רק אם הטיוטה כוללת קריאה
+מפורשת להצביע למועמד/מפלגה או בקשת תרומה; אחרת false. תוכן ביקורתי/ערכי על דמוקרטיה
+שאינו קריאה ישירה — false.
 ודא כיסוי מאוזן של הפילרים לאורך השבוע."""
     text = _message(client, model, prompt, max_tokens=6144, system=SYSTEM_ANALYST)
     data = _extract_json(text)
